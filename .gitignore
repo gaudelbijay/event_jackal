@@ -1,0 +1,13 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore other cache directories
+cache/
+
+# Ignore specific folders
+logs/
+temp/
+e2d/outputs
+local_buffer/event_nav.sif 
+/logging

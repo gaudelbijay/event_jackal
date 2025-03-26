@@ -1,0 +1,60 @@
+<launch>
+  <arg name="use_sim_time" default="true" />
+  <arg name="gui" default="true" />
+  <arg name="headless" default="false" />
+  <arg name="verbose" default="true" />
+  <arg name="world_name" default="$(find jackal_helper)/worlds/all_worlds/worlds/world_55.world" />
+
+  <env name="GAZEBO_PLUGIN_PATH" value="$(find jackal_helper)/lib"/>
+  <param name="shutdown_timeout" value="10"/> 
+<!-- 
+  <arg name="front_flea3" default="true" />
+  <arg name="default_config" value="front_flea3" if="$(arg front_flea3)" />
+  <arg name="default_config" value="base" unless="$(arg front_flea3)" /> -->
+
+  
+  <arg name="front_realsense" default="true" />
+  <arg name="default_config" value="front_realsense" if="$(arg front_realsense)" />
+  <arg name="default_config" value="base" unless="$(arg front_realsense)" />
+
+  <arg name="console_conf" value="verbose.conf" if="$(arg verbose)" />
+  <arg name="console_conf" value="non_verbose.conf" unless="$(arg verbose)" />
+
+  <env name="ROSCONSOLE_CONFIG_FILE" value="$(find jackal_helper)/configs/$(arg console_conf)"/>
+
+  <arg name="config" default="$(arg default_config)" />
+  <arg name="joystick" default="false" />
+
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="debug" value="0" />
+    <arg name="gui" value="$(arg gui)" />
+    <arg name="use_sim_time" value="$(arg use_sim_time)" />
+    <arg name="headless" value="$(arg headless)" />
+    <arg name="world_name" value="$(arg world_name)" />
+  </include>
+
+  <include file="$(find jackal_gazebo)/launch/spawn_jackal.launch">
+    <arg name="x" value="-2.0" />
+    <arg name="y" value="2.0" />
+    <arg name="z" value="1.0" />
+    <arg name="yaw" value="90" />
+    <arg name="config" value="$(arg config)" />
+    <arg name="joystick" value="$(arg joystick)" />
+  </include>
+
+
+  <include file="$(find esim)/launch/event_camera.launch">
+  </include>
+
+  <include file="$(find dv_ros)/launch/dvs.launch"/>
+
+  <node pkg="esim" type="node_event" name="node_event" output="screen">
+    <param name="image_topic" value="/realsense/color/image_raw"/>
+    <param name="event_topic" value="/output/event"/>
+    <param name="log_level" value="debug"/>
+  </node>
+
+  <node pkg="jackal_helper" type="collision_publisher_node" name="collision_publisher_node" output="screen">
+  </node>
+
+</launch>

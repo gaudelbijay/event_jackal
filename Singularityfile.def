@@ -1,0 +1,146 @@
+Bootstrap: docker
+From: ros:noetic
+
+%setup
+    # Create the catkin workspace directory inside the container
+    mkdir -p ${SINGULARITY_ROOTFS}/event_ws/src/
+
+%files
+    # Copy your project directories into the container
+    ../event_jackal           /event_ws/src/event_jackal
+    ../jackal                 /event_ws/src/jackal
+    ../eband_local_planner    /event_ws/src/eband_local_planner
+    ../libtorch               /opt/libtorch
+
+%post -c /bin/bash
+    set -e
+
+    echo "🛠️ Installing basic dependencies"
+    apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        curl \
+        wget \
+        unzip \
+        git \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        python3-opencv \
+        libopencv-dev \
+        ros-noetic-jackal-simulator \
+        ros-noetic-jackal-desktop \
+        ros-noetic-jackal-navigation \
+        ros-noetic-jackal-gazebo \
+        ros-noetic-gazebo-ros-pkgs \
+        ros-noetic-gazebo-ros-control \
+        ros-noetic-catkin \
+        ros-noetic-vision-opencv \
+        ros-noetic-cv-bridge \
+        ros-$ROS_DISTRO-realsense2-camera \
+        ros-$ROS_DISTRO-realsense2-description \
+        ros-$ROS_DISTRO-gazebo-plugins \
+        python3-catkin-pkg \
+        python3-rosdep \
+        python3-rosinstall \
+        python3-rosinstall-generator \
+        python3-wstool \
+        python3-empy \
+        build-essential
+
+    echo "🔥 Installing g++-11"
+    add-apt-repository ppa:ubuntu-toolchain-r/test -y
+    apt-get update && apt-get install -y g++-11 gcc-11
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+
+    echo "📦 Installing CMake ≥ 3.18"
+    CMAKE_VERSION=3.22.6
+    cd /tmp
+    wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}.tar.gz
+    tar -xzf cmake-${CMAKE_VERSION}.tar.gz
+    cd cmake-${CMAKE_VERSION}
+    ./bootstrap -- -DCMAKE_USE_OPENSSL=OFF
+    make -j$(nproc)
+    make install
+    cmake --version
+
+    echo "🎯 Installing CUDA 12.8"
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-ubuntu2004.pin -O /etc/apt/preferences.d/cuda-repository-pin-600
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys A4B469963BF863CC
+    add-apt-repository "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/ /"
+    apt-get update && apt-get install -y cuda-toolkit-12-8
+    ln -sf /usr/local/cuda-12.8 /usr/local/cuda
+
+    echo "🐍 Setting up Python venv"
+    python3 -m venv --system-site-packages /venv
+    source /venv/bin/activate
+    pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    echo "🤖 Installing ROS dependencies (again)"
+    apt-get install -y --no-install-recommends \
+        ros-noetic-jackal-simulator \
+        ros-noetic-jackal-desktop \
+        ros-noetic-jackal-navigation \
+        ros-noetic-jackal-gazebo \
+        ros-noetic-gazebo-ros-pkgs \
+        ros-noetic-gazebo-ros-control \
+        ros-noetic-catkin \
+        ros-noetic-vision-opencv \
+        ros-noetic-cv-bridge \
+        ros-noetic-realsense2-camera \
+        ros-noetic-realsense2-description \
+        ros-noetic-gazebo-plugins \
+        python3-catkin-pkg \
+        python3-rosdep \
+        python3-rosinstall \
+        python3-rosinstall-generator \
+        python3-wstool \
+        python3-empy
+
+    echo "📥 Installing Python requirements from requirements.txt"
+    cd /event_ws/src/event_jackal
+    pip install --no-cache-dir -r requirements.txt
+
+    echo "🔧 Building catkin workspace"
+    source /opt/ros/noetic/setup.bash
+    cd /event_ws/src
+    rosdep update
+    rosdep install --from-paths . --ignore-src --rosdistro=noetic --skip-keys="opencv" -y
+
+    export LIBTORCH=/opt/libtorch
+    export Torch_DIR=/opt/libtorch/share/cmake/Torch
+    export CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+    export LD_LIBRARY_PATH=/opt/libtorch/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    export CMAKE_PREFIX_PATH="/opt/ros/noetic:$Torch_DIR:$CMAKE_PREFIX_PATH"
+    export CUDACXX=/usr/local/cuda/bin/nvcc
+
+    cd /event_ws
+    catkin_make
+
+    echo "🧹 Cleaning up"
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    rm -rf /root/.cache/pip
+
+%environment
+    export PATH="/venv/bin:$PATH"
+    export ROS_DISTRO=noetic
+    export ROS_VERSION=1
+    export ROS_PYTHON_VERSION=3
+    export GAZEBO_PLUGIN_PATH=/opt/ros/$ROS_DISTRO/lib:/usr/lib/x86_64-linux-gnu/gazebo-11/plugins
+    export GAZEBO_MODEL_PATH=/opt/ros/$ROS_DISTRO/share
+    export LIBTORCH=/opt/libtorch
+    export Torch_DIR=/opt/libtorch/share/cmake/Torch
+    export CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+    export LD_LIBRARY_PATH=/opt/libtorch/lib:/usr/local/cuda/lib64:/opt/ros/$ROS_DISTRO/lib:/usr/lib/x86_64-linux-gnu:/usr/local/lib:$LD_LIBRARY_PATH
+    export CMAKE_PREFIX_PATH="/opt/ros/noetic:$Torch_DIR:$CMAKE_PREFIX_PATH"
+    export CUDACXX=/usr/local/cuda/bin/nvcc
+    export PYTHONPATH=/opt/ros/$ROS_DISTRO/lib/python3/dist-packages:$PYTHONPATH
+    export PATH=/opt/ros/$ROS_DISTRO/bin:$PATH
+
+    source /opt/ros/noetic/setup.bash
+    source /event_ws/devel/setup.bash
+
+%runscript
+    echo "🚀 Welcome to the event-jackal container!"
+    exec "$@"

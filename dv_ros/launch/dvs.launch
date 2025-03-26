@@ -1,0 +1,6 @@
+<launch>
+
+    <!-- camera driver -->
+    <node name="event_publisher_node" pkg="dv_ros" type="node" output="screen"></node>
+
+</launch>

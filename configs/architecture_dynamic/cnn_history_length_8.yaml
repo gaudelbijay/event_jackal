@@ -1,0 +1,61 @@
+env_config:
+  collector: "container"
+  env_id: "motion_control_continuous_events-v0"
+  seed: 14
+  stack_frame: 8   # span 1, 4, 8
+  kwargs:
+    world_name: "world_0.world"
+    gui: false
+    verbose: false
+    max_step: 400
+    time_step: 0.2
+    slack_reward: 0
+    collision_reward: -1
+    failure_reward: 0
+    success_reward: 20
+    goal_reward: 1
+    max_collision: 1
+    init_position: [-2, 2, 1.57]
+    goal_position: [-2, 10, 0]
+
+    event_clip: 256
+    min_v: -1
+    max_v: 2
+    min_w: -1.35
+    max_w: 1.35
+
+training_config:
+  algorithm: "SAC"
+  encoder: "cnn"  # span "mlp", "cnn", "rnn", "transformer"
+  buffer_size: 100000
+  actor_lr: 0.00001
+  critic_lr: 0.00002
+  # For head
+  num_layers: 1
+  hidden_layer_size: 512
+  # For encoder
+  encoder_num_layers: 3
+  encoder_hidden_layer_size: 512
+  pre_collect: 4096
+  log_intervals: 1
+
+  policy_args:
+    tau: 0.005
+    gamma: 0.99
+    alpha: 0.4
+    automatic_entropy_tuning: True
+    n_step: 4
+
+  training_args:
+    max_step: 4000000
+    collect_per_step: 4096
+    update_per_step: 1024
+    batch_size: 128
+
+container_config:
+  # 5 container running in parallel
+  num_actor: 1
+  # 50 training static worlds
+  worlds: [271, 256, 162, 194, 255, 277, 239, 262, 251, 279, 274, 247, 204, 212, 297, 189, 219, 258, 153, 157, 151, 231, 158, 214, 186, 293, 285, 152, 232, 286, 249, 211, 175, 199, 273, 184, 269, 187, 229, 272, 280, 154, 191, 237, 220, 235, 179, 288, 244, 226]
+
+  test_worlds: [156, 242, 183, 185, 224, 217, 215, 225, 291, 165, 172, 245, 283, 207, 197, 296, 246, 295, 190, 166, 257, 282, 252, 210, 281, 170, 248, 168, 278, 218, 195, 181, 230, 289, 174, 234, 287, 203, 238, 250, 259, 209, 254, 294, 290, 299, 228, 284, 243, 192] 

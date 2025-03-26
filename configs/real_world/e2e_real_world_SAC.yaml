@@ -1,0 +1,53 @@
+env_config:
+  collector: "local"
+  env_id: "jackal_motion_control_continuous_events-v0"
+  seed: 14
+  stack_frame: 1   # span 1, 4, 8
+  kwargs:
+    world_name: 0
+    gui: false
+    verbose: false
+    max_step: 400
+    time_step: 0.2
+    slack_reward: 0
+    collision_reward: -1
+    failure_reward: 0
+    success_reward: 20
+    goal_reward: 1
+    max_collision: 1
+    init_position: [-2, 2, 0]
+    goal_position: [-2, 7, 0]
+
+    event_clip: 256
+    min_v: -1
+    max_v: 1
+    min_w: -1.35
+    max_w: 1.35
+
+training_config:
+  algorithm: "SAC"
+  encoder: "cnn"  # span "mlp", "cnn", "rnn", "transformer"
+  buffer_size: 200000
+  actor_lr: 0.00001
+  critic_lr: 0.00002
+  # For head
+  num_layers: 1
+  hidden_layer_size: 512
+  # For encoder
+  encoder_num_layers: 2
+  encoder_hidden_layer_size: 512
+  pre_collect: 1024
+  log_intervals: 1
+
+  policy_args:
+    tau: 0.005
+    gamma: 0.99
+    alpha: 0.4
+    automatic_entropy_tuning: True
+    n_step: 4
+
+  training_args:
+    max_step: 4000000
+    collect_per_step: 1024
+    update_per_step: 1024
+    batch_size: 256

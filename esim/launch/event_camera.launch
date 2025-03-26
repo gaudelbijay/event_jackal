@@ -1,0 +1,10 @@
+<launch>
+  <node pkg="esim" type="node_event" name="event_camera_node" output="screen">
+    <param name="rate" value="100" />
+    <param name="buffer_size" value="5" />
+    <param name="refractory_period_ns" value="50000" />
+    <param name="ct_pos" value="0.2" />
+    <param name="ct_neg" value="0.2" />
+
+  </node>
+</launch>
