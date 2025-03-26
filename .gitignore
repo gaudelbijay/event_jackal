@@ -1,9 +1,11 @@
 # Ignore Python cache files
 __pycache__/
 *.pyc
-.vscode
-# Ignore other cache directories
+.*
+!.git/
+!.gitignore
 cache/
+local_buffer/
 
 # Ignore specific folders
 logs/
