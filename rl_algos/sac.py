@@ -104,6 +104,7 @@ class Critic(nn.Module):
         q1 = self.fc1(q1)
         return q1
 
+
 class SAC(BaseRLAlgo):
     def __init__(
             self,
@@ -122,7 +123,14 @@ class SAC(BaseRLAlgo):
             actor_max_norm=10.0,
             critic_max_norm=10.0,
             alpha_max_norm=2.0,
-            q_value_clip=None,
+            q_value_clip=1000.0,
+            # Safety parameters
+            use_safe_critic=True,
+            safe_critic=None,
+            safe_critic_optim=None,
+            safe_threshold=-0.1,
+            safe_lagr=0.1,
+            safe_mode="lagr",
     ):
         super(SAC, self).__init__(actor, actor_optim, critic, critic_optim, action_range, n_step, gamma, device)
         self.critic_target = copy.deepcopy(self.critic).to(self.device)
@@ -134,6 +142,36 @@ class SAC(BaseRLAlgo):
         self.critic_max_norm = critic_max_norm
         self.alpha_max_norm = alpha_max_norm
         self.q_value_clip = q_value_clip
+
+        # Safety flag and parameters
+        self.use_safe_critic = use_safe_critic
+        self.safe_threshold = safe_threshold
+        self.safe_lagr = safe_lagr
+        self.safe_mode = safe_mode
+        
+        # Initialize safety-related components if needed
+        if self.use_safe_critic:
+            # Create safety critic if not provided
+            if safe_critic is None:
+                # Clone the standard critic to create a safety critic
+                self.safe_critic = copy.deepcopy(critic).to(self.device)
+            else:
+                self.safe_critic = safe_critic.to(self.device)
+                
+            # Create target for safety critic
+            self.safe_critic_target = copy.deepcopy(self.safe_critic).to(self.device)
+            
+            # Set up safety critic optimizer
+            if safe_critic_optim is None:
+                self.safe_critic_optimizer = torch.optim.Adam(self.safe_critic.parameters(), lr=1e-3)
+            else:
+                self.safe_critic_optimizer = safe_critic_optim
+                
+            # Setup for Lyapunov method if needed
+            if self.safe_mode == "lyapunov":
+                self.grad_dims = [p.numel() for p in self.actor.parameters()]
+                n_params = sum(self.grad_dims)
+                self.grads = torch.zeros((n_params, 2)).to(self.device)
 
         # Handle actor wrapped in DataParallel if necessary
         if hasattr(actor, "module"):
@@ -151,6 +189,32 @@ class SAC(BaseRLAlgo):
             self.alpha_optim = torch.optim.Adam([self.log_alpha], lr=alpha_lr)
         else:
             self.alpha = alpha
+            
+    def grad2vec(self, grad, i):
+        """Convert gradients to vector form for Lyapunov method"""
+        self.grads[:,i].fill_(0.0)
+        beg = 0
+        for p, g, dim in zip(self.actor.parameters(), grad, self.grad_dims):
+            en = beg + dim
+            if g is not None:
+                self.grads[beg:en,i].copy_(g.view(-1).data.clone())
+            beg = en
+
+    def vec2grad(self, grad):
+        """Convert vector back to gradients for Lyapunov method"""
+        beg = 0
+        for p, dim in zip(self.actor.parameters(), self.grad_dims):
+            en = beg + dim
+            p.grad = grad[beg:en].data.clone().view(*p.shape)
+            beg = en
+
+    def safe_update(self, neg_safe_advantage):
+        """Calculate safe update direction using Lyapunov method"""
+        g1 = self.grads[:,0]
+        g2 = -self.grads[:,1]
+        phi = neg_safe_advantage.detach() - self.safe_threshold
+        lmbd = F.relu((0.1 * phi - g1.dot(g2))/(g2.dot(g2)+1e-8))
+        return g1 + lmbd * g2
 
     def train_rl(self, state, action, next_state, reward, not_done, gammas, collision_reward):
         # Convert action from replay buffer to the neural net expected range
@@ -162,8 +226,14 @@ class SAC(BaseRLAlgo):
             target_Q1, target_Q2 = self.critic_target(next_state, next_action)
             target_Q = torch.min(target_Q1, target_Q2) - self.alpha * next_log_prob
             target_Q = reward + not_done * (gammas * target_Q)
-            if self.q_value_clip is not None:
-                target_Q = torch.clamp(target_Q, min=-self.q_value_clip, max=self.q_value_clip)
+            # Apply Q-value clipping
+            target_Q = torch.clamp(target_Q, min=-self.q_value_clip, max=self.q_value_clip)
+                
+            # Calculate safety targets if using safe critic
+            if self.use_safe_critic:
+                safe_target_Q1, safe_target_Q2 = self.safe_critic_target(next_state, next_action)
+                safe_target_Q = torch.min(safe_target_Q1, safe_target_Q2)
+                safe_target_Q = collision_reward + not_done * (gammas * safe_target_Q)
 
         # Update critic
         current_Q1, current_Q2 = self.critic(state, action_norm)
@@ -174,21 +244,72 @@ class SAC(BaseRLAlgo):
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self.critic_max_norm)
         critic_grad_norm = self.grad_norm(self.critic)
         self.critic_optimizer.step()
+        
+        # Update safety critic if using it
+        safe_critic_loss = None
+        safe_critic_grad_norm = None
+        if self.use_safe_critic:
+            safe_current_Q1, safe_current_Q2 = self.safe_critic(state, action_norm)
+            safe_critic_loss = F.mse_loss(safe_current_Q1, safe_target_Q) + F.mse_loss(safe_current_Q2, safe_target_Q)
+            
+            self.safe_critic_optimizer.zero_grad()
+            safe_critic_loss.backward()
+            safe_critic_grad_norm = self.grad_norm(self.safe_critic)
+            self.safe_critic_optimizer.step()
 
-        # Update actor
+        # Actor actions and log probs
         if hasattr(self.actor, "module"):
             action_pi, log_prob, _ = self.actor.module.sample(state)
         else:
             action_pi, log_prob, _ = self.actor.sample(state)
+            
+        # Get Q-values and calculate standard actor loss
         Q1, Q2 = self.critic(state, action_pi)
         Q = torch.min(Q1, Q2)
         actor_loss = (self.alpha * log_prob - Q).mean()
-
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.actor_max_norm)
-        actor_grad_norm = self.grad_norm(self.actor)
-        self.actor_optimizer.step()
+        
+        # Actor update - either with safety or standard
+        actor_grad_norm = None
+        safe_actor_loss = None
+        
+        if self.use_safe_critic:
+            # Get safety values
+            safe_Q1, safe_Q2 = self.safe_critic(state, action_pi)
+            safe_Q = torch.min(safe_Q1, safe_Q2)
+            safe_actor_loss = -safe_Q.mean()  # We want to maximize safety value
+            
+            # Update actor with safety constraints
+            if self.safe_mode == "lagr":  # Lagrangian method
+                self.actor_optimizer.zero_grad()
+                combined_loss = actor_loss + self.safe_lagr * safe_actor_loss
+                combined_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.actor_max_norm)
+                actor_grad_norm = self.grad_norm(self.actor)
+                self.actor_optimizer.step()
+                
+            elif self.safe_mode == "lyapunov":  # Lyapunov method
+                self.actor_optimizer.zero_grad()
+                # Get gradients for task objective
+                grad_1 = torch.autograd.grad(actor_loss, self.actor.parameters(), retain_graph=True)
+                self.grad2vec(grad_1, 0)
+                # Get gradients for safety objective
+                grad_2 = torch.autograd.grad(safe_actor_loss, self.actor.parameters())
+                self.grad2vec(grad_2, 1)
+                # Compute safe update
+                grad = self.safe_update(safe_actor_loss)
+                self.vec2grad(grad)
+                actor_grad_norm = torch.norm(grad).item()
+                self.actor_optimizer.step()
+                
+            else:
+                raise ValueError(f"[error] Unknown safe mode {self.safe_mode}!")
+        else:
+            # Standard SAC actor update
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.actor_max_norm)
+            actor_grad_norm = self.grad_norm(self.actor)
+            self.actor_optimizer.step()
 
         # Update temperature parameter
         if self.automatic_entropy_tuning:
@@ -206,8 +327,14 @@ class SAC(BaseRLAlgo):
         # Update critic target networks
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+            
+        # Update safety critic target if using it
+        if self.use_safe_critic:
+            for param, target_param in zip(self.safe_critic.parameters(), self.safe_critic_target.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-        return {
+        # Build return dictionary
+        return_dict = {
             "Actor_grad_norm": actor_grad_norm,
             "Critic_grad_norm": critic_grad_norm,
             "actor_loss": actor_loss.item(),
@@ -215,6 +342,16 @@ class SAC(BaseRLAlgo):
             "alpha_loss": alpha_loss.item(),
             "alpha": self.alpha.item() if self.automatic_entropy_tuning else self.alpha
         }
+        
+        # Add safety metrics if using safety critic
+        if self.use_safe_critic and safe_actor_loss is not None:
+            return_dict.update({
+                "Safe_critic_norm": safe_critic_grad_norm,
+                "safe_actor_loss": safe_actor_loss.item(),
+                "safe_critic_loss": safe_critic_loss.item()
+            })
+            
+        return return_dict
 
     def select_action(self, state, to_cpu=True):
         # Prepare state as tensor
@@ -235,11 +372,23 @@ class SAC(BaseRLAlgo):
             # Also check for 2D state (e.g. [stack_frame, feature_dim]) and add a batch dimension
             elif state.ndim == 2:
                 state = state.unsqueeze(0)
+                
         # Use underlying module if actor is wrapped in DataParallel
         if hasattr(self.actor, "module"):
             action, *_ = self.actor.module.sample(state)
         else:
             action, *_ = self.actor.sample(state)
+            
+        # Apply safety check if using safe critic
+        if self.use_safe_critic:
+            with torch.no_grad():
+                safe_Q1, safe_Q2 = self.safe_critic(state, action)
+                safe_Q = torch.min(safe_Q1, safe_Q2)
+                
+                # If action might be unsafe, scale it down
+                if safe_Q.mean() < self.safe_threshold:
+                    action = action * 0.8  # Scale down the action
+            
         scaled_action = self.scale_action(action)
         if to_cpu:
             scaled_action = scaled_action.cpu().data.numpy().flatten()
@@ -259,4 +408,3 @@ class SAC(BaseRLAlgo):
             loaded_alpha = pickle.load(f)
         # If loaded_alpha is a tensor, move it to the current device.
         self.alpha = loaded_alpha.to(self.device) if torch.is_tensor(loaded_alpha) else loaded_alpha
-
