@@ -301,8 +301,17 @@ class ProjectionHead(nn.Module):
         self.capsule = CapsuleLayer(num_caps_in=num_caps, dim_caps_in=dim_caps_in,
                                     num_caps_out=num_caps_out, dim_caps_out=dim_caps_out, num_iterations=3)
         
+        # Add a depth-focused branch
+        self.depth_branch = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1)
+        )
+        
+        # Combine general features and depth features
         self.mlp = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
+            nn.Linear(embedding_dim + 256, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, embedding_dim)
@@ -325,13 +334,37 @@ class ProjectionHead(nn.Module):
         num_caps = self.capsule.num_caps_in  # e.g. 16
         capsules_input = pooled.view(B, num_caps, total_dim // num_caps)  # [B, num_caps, dim_caps_in]
         
-        # Capsule layer output.
+        # Capsule layer output for general features
         capsules_output = self.capsule(capsules_input)  # [B, num_caps, dim_caps_out]
-        capsules_flat = capsules_output.view(B, -1)  # [B, embedding_dim]
+        general_features = capsules_output.view(B, -1)  # [B, embedding_dim]
         
-        embedding = self.mlp(capsules_flat)
+        # Depth-focused branch
+        depth_features = self.depth_branch(fused).view(B, -1)  # [B, 256]
+        
+        # Combine general and depth features
+        combined = torch.cat([general_features, depth_features], dim=1)  # [B, embedding_dim+256]
+        
+        # Final MLP
+        embedding = self.mlp(combined)
         embedding = F.normalize(embedding, p=2, dim=1)
         return embedding
+
+# Add a new class for embedding-to-depth conversion
+class EmbeddingToDepth(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim=512, output_size=(32, 32)):
+        super(EmbeddingToDepth, self).__init__()
+        self.output_size = output_size
+        self.mlp = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_size[0] * output_size[1])
+        )
+    
+    def forward(self, embedding):
+        depth = self.mlp(embedding)
+        return depth.view(-1, 1, self.output_size[0], self.output_size[1])
 
 ###############################################
 # 4. Depth Decoder (remains largely unchanged)#
@@ -405,19 +438,29 @@ class DepthNetwork(nn.Module):
                                          embedding_dim=embedding_dim, hidden_dim=1024,
                                          num_heads=4, num_caps=16)
         self.decoder = DepthDecoder(num_out_channels)
+        
+        # Add embedding-to-depth component for cycle consistency
+        self.emb_to_depth = EmbeddingToDepth(embedding_dim, hidden_dim=512, output_size=(32, 32))
     
     def embed(self, x):
         bottleneck, skip_connections = self.encoder(x)
         embedding = self.projection(bottleneck, skip_connections)
         return embedding
 
-    def forward(self, x, return_depth=True):
+    def forward(self, x, return_depth=True, return_cycle=False):
         output_size = (x.size(2), x.size(3))
         bottleneck, skip_connections = self.encoder(x)
         embedding = self.projection(bottleneck, skip_connections)
+        
         if return_depth:
             depth = self.decoder(bottleneck, skip_connections, output_size)
-            return depth, embedding
+            
+            if return_cycle:
+                # Generate small depth map from embedding for cycle consistency
+                mini_depth = self.emb_to_depth(embedding)
+                return depth, embedding, mini_depth
+            else:
+                return depth, embedding
         else:
             return embedding
 
@@ -425,19 +468,36 @@ class DepthNetwork(nn.Module):
 # 6. Example test run                         #
 ###############################################
 if __name__ == "__main__":
+    import torch
     import time
+
+    # Set up device and dummy input.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    batch_size = 2
+    batch_size = 1
     height, width = 480, 640
     dummy_input = torch.randn(batch_size, 1, height, width).to(device)
-    
+
+    # Instantiate the model.
     model = DepthNetwork(num_in_channels=1, num_out_channels=1, form_BEV=1,
                          evs_min_cutoff=1e-3, embedding_dim=1024).to(device)
-    
+
+    # Count the total parameters.
+    total_params = sum(p.numel() for p in model.parameters())
+    print("Total parameters in model:", total_params)
+
+    # Exclude the decoder's parameters to get the parameters "up to embedding."
+    decoder_params = sum(p.numel() for p in model.decoder.parameters())
+    params_upto_embedding = total_params - decoder_params
+    print("Parameters up to embedding (excluding decoder):", params_upto_embedding)
+
+    # Set model to evaluation mode.
     model.eval()
+
+    # Warm-up inference pass.
     with torch.no_grad():
         depth_pred, embedding = model(dummy_input, return_depth=True)
-    
+
+    # Full forward pass inference timing (depth prediction + embedding).
     if device.type == "cuda":
         starter = torch.cuda.Event(enable_timing=True)
         ender = torch.cuda.Event(enable_timing=True)
@@ -457,7 +517,8 @@ if __name__ == "__main__":
     print("Depth prediction shape:", depth_pred.shape)  # Expected: [batch, 1, height, width]
     print("Embedding shape:", embedding.shape)          # Expected: [batch, 1024]
     print("Full forward pass inference time: {:.2f} ms".format(inference_time))
-    
+
+    # Embedding-only inference timing.
     if device.type == "cuda":
         torch.cuda.synchronize()
         starter.record()
@@ -472,5 +533,5 @@ if __name__ == "__main__":
             embedding_only = model.embed(dummy_input)
         inference_time_embed = (time.time() - start_time) * 1000.0
 
-    print("Embedding (only) shape:", embedding_only.shape)  # Expected: [batch, 1024]
-    print("Embedding-only inference time: {:.2f} ms".format(inference_time_embed))
+    print("Embedding-only shape:", embedding_only.shape) 
+    print("Embedding forward pass inference time: {:.2f} ms".format(inference_time_embed))

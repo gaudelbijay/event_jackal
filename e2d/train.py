@@ -5,7 +5,7 @@ import yaml
 import logging
 import time
 import numpy as np
-
+import matplotlib.pyplot as plt
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
@@ -14,7 +14,7 @@ from tqdm import tqdm
 import torchvision.utils as vutils
 
 from .model import DepthNetwork  # This network returns (depth, embedding)
-from .losses import compute_ssl_depth_loss  # Now returns: total_loss, reconstruction_loss, obstacle_loss, contrastive_loss
+from .losses import compute_ssl_depth_loss  # Now returns multiple loss components
 from .dataloader import EventSelfSupervisedDataset, collate_fn
 
 def save_checkpoint(checkpoint, checkpoint_path, logger):
@@ -55,8 +55,9 @@ class Learner:
     def __init__(self, network, optimizer, train_loader, val_loader,
                  device, output_dir, writer, accumulation_steps=16,
                  lambda_recon=1.0, lambda_contrastive=1.0,
-                 lambda_obstacle=1000,
-                 mask_ratio=0.3):
+                 lambda_obstacle=1000, lambda_depth_struct=0.1,
+                 lambda_depth_embedding=1.0, lambda_histogram=0.1,
+                 lambda_cycle=0.0, mask_ratio=0.3):
         self.network = network
         self.optimizer = optimizer
         self.train_loader = train_loader
@@ -65,9 +66,16 @@ class Learner:
         self.output_dir = output_dir
         self.writer = writer
         self.accumulation_steps = accumulation_steps
+        
+        # Loss weights
         self.lambda_recon = lambda_recon
         self.lambda_contrastive = lambda_contrastive
         self.lambda_obstacle = lambda_obstacle
+        self.lambda_depth_struct = lambda_depth_struct
+        self.lambda_depth_embedding = lambda_depth_embedding
+        self.lambda_histogram = lambda_histogram
+        self.lambda_cycle = lambda_cycle
+        
         self.mask_ratio = mask_ratio
 
         self.best_val_loss = float('inf')
@@ -89,7 +97,10 @@ class Learner:
         running_recon_loss = 0.0
         running_obstacle_loss = 0.0
         running_contrastive_loss = 0.0
-        running_consistancy_loss = 0.0
+        running_depth_struct_loss = 0.0
+        running_depth_embedding_loss = 0.0
+        running_histogram_loss = 0.0
+        running_cycle_loss = 0.0
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}", leave=False)
         self.optimizer.zero_grad()
@@ -102,18 +113,34 @@ class Learner:
             mask = (torch.rand(view1.size(0), 1, view1.size(2), view1.size(3), device=view1.device) > self.mask_ratio).float()
             masked_view1 = view1 * mask
 
-            # Forward pass: get (depth, embedding) for each view.
-            depth1, emb1 = self.network(masked_view1, return_depth=True)
-            depth2, emb2 = self.network(view2, return_depth=True)
+            # Forward pass with cycle consistency if enabled
+            if self.lambda_cycle > 0:
+                depth1, emb1, mini_depth1 = self.network(masked_view1, return_depth=True, return_cycle=True)
+                depth2, emb2, mini_depth2 = self.network(view2, return_depth=True, return_cycle=True)
+            else:
+                depth1, emb1 = self.network(masked_view1, return_depth=True)
+                depth2, emb2 = self.network(view2, return_depth=True)
+                mini_depth1, mini_depth2 = None, None
 
             # Compute the self-supervised loss using both views.
-            total_loss, recon_loss, obstacle_loss, contrastive_loss, consistancy_loss = compute_ssl_depth_loss(
+            loss_outputs = compute_ssl_depth_loss(
                 depth1, depth2, view1, view2, emb1, emb2,
                 lambda_recon=self.lambda_recon,
                 lambda_contrastive=self.lambda_contrastive,
                 lambda_obstacle=self.lambda_obstacle,
+                lambda_depth_struct=self.lambda_depth_struct,
+                lambda_depth_embedding=self.lambda_depth_embedding,
+                lambda_histogram=self.lambda_histogram,
+                lambda_cycle=self.lambda_cycle,
+                mini_depth1=mini_depth1,
+                mini_depth2=mini_depth2,
                 temperature=0.1
             )
+            
+            total_loss, recon_loss, obstacle_loss, contrastive_loss, \
+            depth_struct_loss, depth_embedding_loss, histogram_loss, cycle_loss = loss_outputs
+            
+            # Scale loss for gradient accumulation
             total_loss = total_loss / self.accumulation_steps
 
             if self.scaler is not None:
@@ -121,11 +148,16 @@ class Learner:
             else:
                 total_loss.backward()
 
+            # Update running statistics
             running_loss += total_loss.item() * self.accumulation_steps
             running_recon_loss += recon_loss.item()
             running_obstacle_loss += obstacle_loss.item()
             running_contrastive_loss += contrastive_loss.item()
-            running_consistancy_loss += consistancy_loss.item()
+            running_depth_struct_loss += depth_struct_loss.item()
+            running_depth_embedding_loss += depth_embedding_loss.item()
+            running_histogram_loss += histogram_loss.item()
+            running_cycle_loss += cycle_loss.item()
+            
             self.global_step += 1
 
             if (batch_idx + 1) % self.accumulation_steps == 0:
@@ -136,52 +168,114 @@ class Learner:
                     self.optimizer.step()
                 self.optimizer.zero_grad()
 
+            # Update progress bar with selected metrics
             pbar.set_postfix({
                 "loss": f"{running_loss/(batch_idx+1):.4f}",
                 "recon": f"{running_recon_loss/(batch_idx+1):.4f}",
-                "obstacle": f"{running_obstacle_loss/(batch_idx+1):.4f}",
-                "contrastive": f"{running_contrastive_loss/(batch_idx+1):.4f}",
-                "consistancy": f"{running_consistancy_loss/(batch_idx+1):.4f}"
+                "depth_emb": f"{running_depth_embedding_loss/(batch_idx+1):.4f}",
+                "hist": f"{running_histogram_loss/(batch_idx+1):.4f}",
+                "contrastive": f"{running_contrastive_loss/(batch_idx+1): .4f}"
             })
 
+            # Log metrics to TensorBoard
             if batch_idx % 10 == 0:
-                self.writer.add_scalar("Train/TotalLoss", running_loss/(batch_idx+1), self.global_step)
-                self.writer.add_scalar("Train/ReconstructionLoss", running_recon_loss/(batch_idx+1), self.global_step)
-                self.writer.add_scalar("Train/ObstacleLoss", running_obstacle_loss/(batch_idx+1), self.global_step)
-                self.writer.add_scalar("Train/ContrastiveLoss", running_contrastive_loss/(batch_idx+1), self.global_step)
-                self.writer.add_scalar("Train/ConsistancyLoss", running_consistancy_loss/(batch_idx+1), self.global_step)
+                # Average over batches seen so far
+                step_avg = batch_idx + 1
+                self.writer.add_scalar("Train/TotalLoss", running_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/ReconstructionLoss", running_recon_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/ObstacleLoss", running_obstacle_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/ContrastiveLoss", running_contrastive_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/DepthStructLoss", running_depth_struct_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/DepthEmbeddingLoss", running_depth_embedding_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/HistogramLoss", running_histogram_loss/step_avg, self.global_step)
+                self.writer.add_scalar("Train/CycleLoss", running_cycle_loss/step_avg, self.global_step)
 
-        avg_loss = running_loss / len(self.train_loader)
-        avg_recon_loss = running_recon_loss / len(self.train_loader)
-        avg_obstacle_loss = running_obstacle_loss / len(self.train_loader)
-        avg_contrast_loss = running_contrastive_loss / len(self.train_loader)
-        avg_consistancy_loss = running_consistancy_loss/ len(self.train_loader)
+        # Calculate epoch averages
+        num_batches = len(self.train_loader)
+        avg_loss = running_loss / num_batches
+        avg_recon_loss = running_recon_loss / num_batches
+        avg_obstacle_loss = running_obstacle_loss / num_batches
+        avg_contrast_loss = running_contrastive_loss / num_batches
+        avg_depth_struct_loss = running_depth_struct_loss / num_batches
+        avg_depth_emb_loss = running_depth_embedding_loss / num_batches
+        avg_histogram_loss = running_histogram_loss / num_batches
+        avg_cycle_loss = running_cycle_loss / num_batches
+        
+        # Log epoch summary
         self.logger.info(
-            f"Epoch {epoch}: Train Loss = {avg_loss:.4f} (Recon: {avg_recon_loss:.4f}, Obstacle: {avg_obstacle_loss:.4f}, Contrastive: {avg_contrast_loss:.4f}, Consistancy: {avg_consistancy_loss:.4f})"
+            f"Epoch {epoch}: Train Loss = {avg_loss:.4f} "
+            f"(Recon: {avg_recon_loss:.4f}, Obstacle: {avg_obstacle_loss:.4f}, "
+            f"Contrastive: {avg_contrast_loss:.4f}, DepthStruct: {avg_depth_struct_loss:.4f}, "
+            f"DepthEmb: {avg_depth_emb_loss:.4f}, Histogram: {avg_histogram_loss:.4f}, "
+            f"Cycle: {avg_cycle_loss:.4f})"
         )
         return avg_loss
 
     def validate_epoch(self, epoch):
         self.network.eval()
         total_loss = 0.0
+        total_depth_emb_correlation = 0.0
+        
         with torch.no_grad():
             for view1, view2 in self.val_loader:
                 view1 = view1.to(self.device, non_blocking=True)
                 view2 = view2.to(self.device, non_blocking=True)
-                depth1, emb1 = self.network(view1, return_depth=True)
-                depth2, emb2 = self.network(view2, return_depth=True)
-                loss, _, _, _, _= compute_ssl_depth_loss(
+                
+                # Forward pass with cycle consistency if enabled
+                if self.lambda_cycle > 0:
+                    depth1, emb1, mini_depth1 = self.network(view1, return_depth=True, return_cycle=True)
+                    depth2, emb2, mini_depth2 = self.network(view2, return_depth=True, return_cycle=True)
+                else:
+                    depth1, emb1 = self.network(view1, return_depth=True)
+                    depth2, emb2 = self.network(view2, return_depth=True)
+                    mini_depth1, mini_depth2 = None, None
+                
+                # Compute validation loss
+                loss_outputs = compute_ssl_depth_loss(
                     depth1, depth2, view1, view2, emb1, emb2,
                     lambda_recon=self.lambda_recon,
                     lambda_contrastive=self.lambda_contrastive,
                     lambda_obstacle=self.lambda_obstacle,
+                    lambda_depth_struct=self.lambda_depth_struct,
+                    lambda_depth_embedding=self.lambda_depth_embedding,
+                    lambda_histogram=self.lambda_histogram,
+                    lambda_cycle=self.lambda_cycle,
+                    mini_depth1=mini_depth1,
+                    mini_depth2=mini_depth2,
                     temperature=0.1
                 )
+                loss = loss_outputs[0]  # total loss is first element
+                
+                # Compute depth-embedding correlation as a metric
+                depth1_flat = torch.nn.functional.normalize(depth1.view(depth1.size(0), -1), dim=1)
+                emb_sim = torch.matmul(emb1, emb1.t())
+                depth_sim = torch.matmul(depth1_flat, depth1_flat.t())
+                
+                # Calculate correlation between similarity matrices (off-diagonal elements only)
+                mask = ~torch.eye(depth_sim.size(0), dtype=torch.bool, device=depth_sim.device)
+                if mask.sum() > 0:  # Ensure there are off-diagonal elements
+                    correlation = torch.nn.functional.cosine_similarity(
+                        depth_sim[mask].unsqueeze(0),
+                        emb_sim[mask].unsqueeze(0)
+                    ).item()
+                    total_depth_emb_correlation += correlation
+                
                 total_loss += loss.item()
+        
+        # Compute averages
         avg_val_loss = total_loss / len(self.val_loader)
+        avg_correlation = total_depth_emb_correlation / len(self.val_loader)
+        
+        # Log validation results
         self.logger.info(f"Epoch {epoch}: Validation Loss = {avg_val_loss:.4f}")
+        self.logger.info(f"Epoch {epoch}: Depth-Embedding Correlation = {avg_correlation:.4f}")
+        
         self.writer.add_scalar("Validation/Loss", avg_val_loss, epoch)
+        self.writer.add_scalar("Validation/DepthEmbeddingCorrelation", avg_correlation, epoch)
+        
+        # Generate visualizations
         self.save_visualization(epoch)
+        
         return avg_val_loss
 
     def save_visualization(self, epoch):
@@ -197,24 +291,74 @@ class Learner:
             mask = (torch.rand(view1.size(0), 1, view1.size(2), view1.size(3), device=view1.device) > self.mask_ratio).float()
             masked_view1 = view1 * mask
             
-            # Get depth predictions for both views.
-            if hasattr(self.network, 'module'):
-                depth_pred1, _ = self.network.module(masked_view1, return_depth=True)
-                depth_pred2, _ = self.network.module(view2, return_depth=True)
+            # Get depth predictions and embeddings
+            network = self.network.module if hasattr(self.network, 'module') else self.network
+            
+            if self.lambda_cycle > 0:
+                depth_pred1, emb1, mini_depth1 = network(masked_view1, return_depth=True, return_cycle=True)
+                depth_pred2, emb2, mini_depth2 = network(view2, return_depth=True, return_cycle=True)
             else:
-                depth_pred1, _ = self.network(masked_view1, return_depth=True)
-                depth_pred2, _ = self.network(view2, return_depth=True)
+                depth_pred1, emb1 = network(masked_view1, return_depth=True)
+                depth_pred2, emb2 = network(view2, return_depth=True)
+                mini_depth1, mini_depth2 = None, None
         
+        # Create output directory
         vis_dir = os.path.join(self.output_dir, "visualizations", f"epoch_{epoch}")
         os.makedirs(vis_dir, exist_ok=True)
         
-        # Save depth predictions for both views.
+        # Save depth predictions for both views
         vutils.save_image(depth_pred1, os.path.join(vis_dir, "pred_depth_view1.png"), normalize=True)
         vutils.save_image(depth_pred2, os.path.join(vis_dir, "pred_depth_view2.png"), normalize=True)
         
-        # Save the corresponding input views.
+        # Save the corresponding input views
         vutils.save_image(view1, os.path.join(vis_dir, "input_view1.png"), normalize=True)
         vutils.save_image(view2, os.path.join(vis_dir, "input_view2.png"), normalize=True)
+        
+        # Save mini depth reconstructions if available
+        if mini_depth1 is not None and mini_depth2 is not None:
+            vutils.save_image(mini_depth1, os.path.join(vis_dir, "mini_depth1.png"), normalize=True)
+            vutils.save_image(mini_depth2, os.path.join(vis_dir, "mini_depth2.png"), normalize=True)
+        
+        # Create visualization of depth encoding in embedding space
+        # This requires more samples, so use a batch from the validation loader
+        try:
+            if len(self.val_loader) > 0:
+                batch_view1, batch_view2 = next(iter(self.val_loader))
+                batch_view1 = batch_view1.to(self.device)
+                
+                # Get depth and embeddings
+                batch_depth1, batch_emb1 = network(batch_view1, return_depth=True)
+                
+                # Compute depth-embedding relationship visualization if batch is large enough
+                if batch_view1.size(0) >= 8:
+                    # Save embedding similarity matrix
+                    emb_sim = torch.matmul(batch_emb1, batch_emb1.t())
+                    emb_sim_np = emb_sim.cpu().numpy()
+                    
+                    # Save depth similarity matrix
+                    depth_flat = torch.nn.functional.normalize(batch_depth1.view(batch_depth1.size(0), -1), dim=1)
+                    depth_sim = torch.matmul(depth_flat, depth_flat.t())
+                    depth_sim_np = depth_sim.cpu().numpy()
+                    
+                    # Create a figure with two subplots
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                    
+                    # Plot embedding similarity matrix
+                    im1 = ax1.imshow(emb_sim_np, cmap='viridis')
+                    ax1.set_title('Embedding Similarity Matrix')
+                    plt.colorbar(im1, ax=ax1)
+                    
+                    # Plot depth similarity matrix
+                    im2 = ax2.imshow(depth_sim_np, cmap='viridis')
+                    ax2.set_title('Depth Similarity Matrix')
+                    plt.colorbar(im2, ax=ax2)
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(vis_dir, "similarity_matrices.png"))
+                    plt.close()
+                   
+        except:
+            self.logger.warning("Could not create additional visualizations")
         
         self.logger.info(f"Saved visualization for epoch {epoch} at {vis_dir}")
         self.network.train()
@@ -276,15 +420,18 @@ def main():
         shuffle=True,
         num_workers=4,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True  
     )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=train_config['batch_size'],
         shuffle=False,
         num_workers=4,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True  
     )
 
     device = torch.device(train_config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
@@ -297,13 +444,24 @@ def main():
 
     optimizer = optim.Adam(network.parameters(), lr=train_config['lr'])
     accumulation_steps = train_config.get("accumulation_steps", 16)
+    
+    # Loss hyperparameters
     lambda_recon = train_config.get("lambda_recon", 1.0)
     lambda_contrastive = train_config.get("lambda_contrastive", 1.0)
     lambda_obstacle = train_config.get("lambda_obstacle", 100)
+    lambda_depth_struct = train_config.get("lambda_depth_struct", 0.1)
+    lambda_depth_embedding = train_config.get("lambda_depth_embedding", 1.0)
+    lambda_histogram = train_config.get("lambda_histogram", 0.1)
+    lambda_cycle = train_config.get("lambda_cycle", 0.0)
     mask_ratio = train_config.get("mask_ratio", 0.5)
-    learner = Learner(network, optimizer, train_loader, val_loader, device,
-                      log_config['output_dir'], writer, accumulation_steps,
-                      lambda_recon, lambda_contrastive, lambda_obstacle, mask_ratio)
+    
+    learner = Learner(
+        network, optimizer, train_loader, val_loader, device,
+        log_config['output_dir'], writer, accumulation_steps,
+        lambda_recon, lambda_contrastive, lambda_obstacle, 
+        lambda_depth_struct, lambda_depth_embedding,
+        lambda_histogram, lambda_cycle, mask_ratio
+    )
 
     if args.resume or train_config.get("resume", False):
         resume_path = train_config.get("checkpoint_path", None)
