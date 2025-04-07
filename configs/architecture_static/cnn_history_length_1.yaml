@@ -2,7 +2,7 @@ env_config:
   collector: "container"
   env_id: "motion_control_continuous_events-v0"
   seed: 14
-  stack_frame: 8   # span 1, 4, 8
+  stack_frame: 1   # span 1, 4, 8
   kwargs:
     world_name: "world_0.world"
     gui: true
@@ -53,7 +53,7 @@ training_config:
     max_step: 1000000
     collect_per_step: 1024
     update_per_step: 1024
-    batch_size: 256
+    batch_size: 128
 
 container_config:
   # 5 container running in parallel

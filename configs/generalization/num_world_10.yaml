@@ -5,24 +5,24 @@ env_config:
   stack_frame: 1   # span 1, 4, 8
   kwargs:
     world_name: "world_0.world"
-    gui: false
+    gui: true
     verbose: false
-    max_step: 400
-    time_step: 0.2
+    max_step: 800
+    time_step: 0.1
     slack_reward: 0
-    collision_reward: -1
+    collision_reward: -3
     failure_reward: 0
     success_reward: 20
-    goal_reward: 1
+    goal_reward: 3
     max_collision: 1
     init_position: [-2, 3, 1.57]
     goal_position: [0, 10, 0]
 
-    event_clip: 1024
-    min_v: -1
+    event_clip: 2
+    min_v: -0.5
     max_v: 2
-    min_w: -3.14
-    max_w: 3.14
+    min_w: -1.57
+    max_w: 1.57
 
 training_config:
   algorithm: "SAC"
@@ -50,7 +50,7 @@ training_config:
     n_step: 4
 
   training_args:
-    max_step: 4000000
+    max_step: 1000000
     collect_per_step: 4096
     update_per_step: 1024
     batch_size: 128

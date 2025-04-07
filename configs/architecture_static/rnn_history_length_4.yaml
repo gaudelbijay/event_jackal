@@ -2,7 +2,7 @@ env_config:
   collector: "container"
   env_id: "motion_control_continuous_events-v0"
   seed: 14
-  stack_frame: 8   # span 1, 4, 8
+  stack_frame: 4   # span 1, 4, 8
   kwargs:
     world_name: "world_0.world"
     gui: true
@@ -26,7 +26,7 @@ env_config:
 
 training_config:
   algorithm: "SAC"
-  encoder: "cnn"  # span "mlp", "cnn", "rnn", "transformer"
+  encoder: "rnn"  # span "mlp", "cnn", "rnn", "transformer"
   buffer_size: 200000
   actor_lr: 0.00001
   critic_lr: 0.00002

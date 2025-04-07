@@ -50,8 +50,8 @@ class JackalGazebo(gym.Env):
         self.time_step = time_step
         self.max_step = 800#max_step
         self.slack_reward = slack_reward
-        self.failure_reward = failure_reward
-        self.success_reward = success_reward
+        self.failure_reward = -5# failure_reward
+        self.success_reward =  success_reward
         self.collision_reward = collision_reward
         self.goal_reward = goal_reward
         self.max_collision = max_collision

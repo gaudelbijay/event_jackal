@@ -185,13 +185,15 @@ class GazeboSimulation:
         """
         data = np.frombuffer(msg.data, dtype=np.uint8)
         frame = data.reshape((IMAGE_HEIGHT, IMAGE_WIDTH)).astype(np.float32)
-        
-        frame = (frame - 128) * 0.2
 
+        # frame_plot = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
+        # cv2.imshow("depth", frame_plot)
+        # cv2.waitKey(1)
+
+
+        frame = (frame - 128) * 0.2
         frame_tensor = torch.from_numpy(frame)
-        
         frame_tensor = (frame_tensor.abs() > 0).float()
-        
         empty_mask = (frame_tensor == 0)
         noise_mask = (torch.rand_like(frame_tensor) < 0.005) & empty_mask 
         frame_tensor[noise_mask] = 1.0
@@ -200,7 +202,14 @@ class GazeboSimulation:
         with torch.no_grad():
             embeddings = model(input_tensor, return_depth=False)
             embeddings = embeddings.cpu().detach().numpy()
+            self.embedding = embeddings
+
+
         #     ## print(embeddings)
+
+        #     depth, embeddings = model(input_tensor, return_depth=True)
+        #     embeddings = embeddings.cpu().detach().numpy()
+        #     self.embedding = embeddings
         #     depth = depth.cpu().detach().numpy()
         #     depth = depth.squeeze(0)
         #     depth = np.transpose(depth, (1, 2, 0))
@@ -210,10 +219,6 @@ class GazeboSimulation:
 
         # cv2.imshow("depth", depth_uint8)
         # cv2.waitKey(1)
-
-        self.embedding = embeddings
-        # rospy.loginfo("Embedding computed: %s", embeddings)
-
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ env_config:
 
 training_config:
   algorithm: "SAC"
-  encoder: "cnn"  # span "mlp", "cnn", "rnn", "transformer"
+  encoder: "mlp"  # span "mlp", "cnn", "rnn", "transformer"
   buffer_size: 200000
   actor_lr: 0.00001
   critic_lr: 0.00002
