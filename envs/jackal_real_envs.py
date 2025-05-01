@@ -32,9 +32,8 @@ class JackalRobotEnv(gym.Env):
         goal_reward=1,
         max_collision=10000,
         verbose=True,
-        init_sim=True
+        init_sim=False
     ):
-        """Initialize the Jackal simulation in Gazebo"""
         super().__init__()
 
         # Configuration parameters
@@ -59,7 +58,7 @@ class JackalRobotEnv(gym.Env):
         )
 
         self.jackal_robot = JackalRealRobot(init_position=self.init_position)
-        self.event_shape = self.jackal_robot.event_shape
+        self.event_shape = self.jackal_robot.embedding_shape
 
         # Initialize environment attributes
         self.action_space = None
@@ -134,7 +133,7 @@ class JackalRobotEnv(gym.Env):
     def _check_termination(self, pos, goal_pos):
         """Check if the episode should terminate"""
         flip = pos.z > 0.1  # Check if the robot has flipped
-        success = np.linalg.norm(goal_pos) < 0.4
+        success = np.linalg.norm(goal_pos) < 1
         timeout = self.step_count >= self.max_step
         collided = self.jackal_robot.get_hard_collision() and self.step_count > 1
         self.collision_count += int(collided)
@@ -175,66 +174,50 @@ class JackalRobotEnv(gym.Env):
 
 
 class JackalRobotEvents(JackalRobotEnv):
-    def __init__(self, event_clip=256, **kwargs):
+    def __init__(self, event_clip=2.0, **kwargs):
         super().__init__(**kwargs)
-        self.event_clip = event_clip
-    
-        self.observation_space = Tuple((
-            Box(low=-1, high=1, shape=self.event_shape, dtype=np.float32),  # Event data
-            Box(low=-1, high=20, shape=(2 + self.action_dim,), dtype=np.float32)  # Goal position + action
-        ))
+        self.embedding_clip = event_clip
+        
+        obs_dim = 1024 + 2 + 2 #self.action_dim
+        self.observation_space = Box(
+            low=np.float32(-2.0),
+            high=np.float32(event_clip),
+            shape=(obs_dim,),
+            dtype=np.float32
+        )
 
-    def _get_event_data(self):
-        """Get event data from the environment"""
-        return self.jackal_robot.get_events()
-
-    def _observation_laser(self):
-        """Normalize laser scan data"""
-        laser_scan = self._get_laser_scan()
-        return (laser_scan - self.event_clip / 2.0) / (self.event_clip / 2.0)
+    def _get_embedding_data(self):
+        return self.jackal_robot.get_embedding()
 
     def _observation_events(self):
-        """Normalize event data"""
-        event_data = self._get_event_data()
-        
-        return event_data
+        return self._get_embedding_data()
 
     def _get_observation(self, pos, psi, action):
-        """Get the observation as a tuple."""
-        # Get normalized event data
+        # Get event data
         event_data = self._observation_events().astype(np.float32)
-        
-        # Transform goal position and normalize
-        goal_pos = self.transform_goal(self.world_frame_goal, pos, psi) / 5.0 - 1.0
-        goal_pos = goal_pos.astype(np.float32)
 
-        # Normalize the action based on action space limits
+        # Transform and normalize goal position
+        goal_pos = self.transform_goal(self.world_frame_goal, pos, psi) / 5.0 - 1  # roughly (-1, 1) range
+
+        # Normalize action
         bias = (self.action_space.high + self.action_space.low) / 2.0
         scale = (self.action_space.high - self.action_space.low) / 2.0
         action = (action - bias) / scale
-        action = action.astype(np.float32)
 
-        # Concatenate goal position and action
-        goal_action = np.concatenate([goal_pos, action]).astype(np.float32)
-
-        # Return observation as a tuple
-        obs = (event_data, goal_action)
-        
-        # Optionally, clip observations to ensure they are within the observation space
-        obs = (
-            np.clip(obs[0], self.observation_space.spaces[0].low, self.observation_space.spaces[0].high),
-            np.clip(obs[1], self.observation_space.spaces[1].low, self.observation_space.spaces[1].high)
-        )
-
+        obs = [event_data.flatten(), goal_pos.astype(np.float32), action.astype(np.float32)]
+        # print(obs)
+        obs = np.concatenate(obs)
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         return obs
-
-
-    def transform_goal(self, goal_pos, pos, psi):
-        """Transform goal into the robot's frame"""
-        cos_psi, sin_psi = np.cos(psi), np.sin(psi)
-        R_r2i = np.array([[cos_psi, -sin_psi, pos.x], [sin_psi, cos_psi, pos.y], [0, 0, 1]])
-        R_i2r = np.linalg.inv(R_r2i)
-        pi = np.array([[goal_pos[0]], [goal_pos[1]], [1]])
-        pr = np.matmul(R_i2r, pi)
-        return np.array([pr[0, 0], pr[1, 0]])
     
+    def transform_goal(self, goal_pos, pos, psi):
+        """ transform goal in the robot frame
+        params:
+            pos_1
+        """
+        R_r2i = np.matrix([[np.cos(psi), -np.sin(psi), pos.x], [np.sin(psi), np.cos(psi), pos.y], [0, 0, 1]])
+        R_i2r = np.linalg.inv(R_r2i)
+        pi = np.matrix([[goal_pos[0]], [goal_pos[1]], [1]])
+        pr = np.matmul(R_i2r, pi)
+        lg = np.array([pr[0,0], pr[1, 0]])
+        return lg

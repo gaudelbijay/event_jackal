@@ -186,11 +186,6 @@ class GazeboSimulation:
         data = np.frombuffer(msg.data, dtype=np.uint8)
         frame = data.reshape((IMAGE_HEIGHT, IMAGE_WIDTH)).astype(np.float32)
 
-        # frame_plot = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
-        # cv2.imshow("depth", frame_plot)
-        # cv2.waitKey(1)
-
-
         frame = (frame - 128) * 0.2
         frame_tensor = torch.from_numpy(frame)
         frame_tensor = (frame_tensor.abs() > 0).float()

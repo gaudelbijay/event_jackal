@@ -1,6 +1,6 @@
 import os
 from typing import Tuple, Optional, Callable, List
-
+import torch.nn.functional as F 
 import numpy as np
 import torch
 from math import sin, cos, pi
@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
 from PIL import Image  # For perspective transformation
+import cv2 
 
 def calculate_valid_crop_size(angle_radians: float, width: int, height: int) -> Tuple[int, int]:
     """
@@ -129,6 +130,41 @@ def augment_event(img: torch.Tensor,
     
     return img
 
+
+def remove_isolated_pixels(frame_tensor: torch.Tensor,
+                           kernel_size: int = 2,
+                           min_pixels: int = 4) -> torch.Tensor:
+    """
+    Drop tiny noise blobs from a 2D event tensor via a 2×2 opening
+    + CC pruning. Accepts a tensor [H,W] or [1,H,W] of ints/floats,
+    returns the same shape and dtype back on the original device.
+    """
+    # 1) Bring to [H,W] numpy array on CPU
+    device = frame_tensor.device
+    arr = frame_tensor.detach().cpu().numpy()
+
+    # 2) Binary mask of events
+    mask = (arr != 0).astype(np.uint8)
+
+    # 3) Morphological opening (2×2)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    # 4) Connected-components pruning
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    clean_mask = np.zeros_like(mask)
+    for lab in range(1, n_labels):
+        if stats[lab, cv2.CC_STAT_AREA] >= min_pixels:
+            clean_mask[labels == lab] = 1
+
+    # 5) Apply mask & restore dtype
+    cleaned = arr * clean_mask
+    cleaned = cleaned.astype(arr.dtype)
+
+    # 6) Back to tensor on original device
+    return torch.from_numpy(cleaned).to(device)
+
+
 class EventSelfSupervisedDataset(Dataset):
     """
     Dataset for self-supervised learning using event data stored in .npy files.
@@ -164,10 +200,11 @@ class EventSelfSupervisedDataset(Dataset):
         
         # Binarize: set positive polarity to 1.
         event_tensor = (event_tensor.abs() > 0).float()
+        event_tensor = remove_isolated_pixels(event_tensor)
         
         # Add noise: for a small fraction of zero pixels, set value to 1.
         empty_mask = (event_tensor == 0)
-        noise_mask = (torch.rand_like(event_tensor) < 0.0050) & empty_mask
+        noise_mask = (torch.rand_like(event_tensor) < 0.00050) & empty_mask
         event_tensor[noise_mask] = 1.0
         
         if self.print_debug:

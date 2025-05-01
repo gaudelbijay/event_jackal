@@ -1,10 +1,5 @@
 from gym.envs.registration import register
 
-# DWA envs
-register(
-    id="dwa_param_continuous_events-v0",
-    entry_point="envs.parameter_tuning_envs:DWAParamContinuousEvents"
-)
 
 # Motion control envs
 register(

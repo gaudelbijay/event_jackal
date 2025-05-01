@@ -13,8 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import torchvision.utils as vutils
 
-from .model import DepthNetwork  # This network returns (depth, embedding)
-from .losses import compute_ssl_depth_loss  # Now returns multiple loss components
+from .model import DepthNetwork  
+from .losses import compute_ssl_depth_loss 
 from .dataloader import EventSelfSupervisedDataset, collate_fn
 
 def save_checkpoint(checkpoint, checkpoint_path, logger):
