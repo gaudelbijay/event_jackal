@@ -1,4 +1,4 @@
-![Model diagram](media/model.pdf)
+![Model diagram](media/model.png)
 
 This repository implements an event driven reinforcement learning framework for autonomous robot navigation using neuromorphic event cameras. Instead of relying on dense frame based sensors or laser scanners, the system processes asynchronous event streams to produce compact Binary Event Maps and learns a self supervised contrastive perception embedding optimized for navigation. The learned representation is used by reinforcement learning policies including MLP, CNN, GRU, and Transformer agents trained with Soft Actor Critic. The approach achieves navigation performance comparable to laser based systems in simulation and successfully transfers to a real Jackal UGV with minimal real world calibration, demonstrating the practicality of event based perception for robotic navigation.
 
