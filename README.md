@@ -46,6 +46,12 @@ After installing, verify the installation by running:
 apptainer --version
 ```
 
+## Build the apptainer image
+```bash
+apptainer build event_nav.sif Singularity.def
+```
+**Move the built apptainer image `event_nav.sif` to local_buffer directory**
+
 ## Install catkin tools if needed:
 
 ```bash
